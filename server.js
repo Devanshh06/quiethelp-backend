@@ -6,13 +6,24 @@ dotenv.config(); // Load env variables FIRST
 import express from "express";
 import cors from "cors";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { createClient } from "@supabase/supabase-js";
 
 // ---------------- BASIC SETUP ----------------
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors()); // allow frontend requests
+app.use(cors());
 app.use(express.json());
+
+// ---------------- SUPABASE SETUP (SERVER ONLY) ----------------
+if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.error("❌ Supabase environment variables missing");
+}
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY // ⚠️ SERVER ONLY
+);
 
 // ---------------- GEMINI SETUP ----------------
 if (!process.env.GEMINI_API_KEY) {
@@ -26,9 +37,7 @@ const model = genAI.getGenerativeModel({
 
 // ---------------- HEALTH CHECK ----------------
 app.get("/", (req, res) => {
-  res.json({
-    status: "QuietHelp backend running",
-  });
+  res.json({ status: "QuietHelp backend running" });
 });
 
 // ---------------- ANALYZE ROUTE ----------------
@@ -109,11 +118,9 @@ OUTPUT FORMAT (STRICT JSON):
 }
 `;
 
-    // ---------- CALL GEMINI ----------
     const result = await model.generateContent(prompt);
     let aiText = result.response.text();
 
-    // ---------- CLEAN & PARSE JSON ----------
     aiText = aiText.replace(/```json|```/g, "").trim();
 
     let parsed;
@@ -127,15 +134,12 @@ OUTPUT FORMAT (STRICT JSON):
       });
     }
 
-    // ---------- SUCCESS ----------
     res.json({
       success: true,
       data: parsed,
     });
   } catch (err) {
     console.error("❌ Gemini error:", err.message);
-
-    // ---------- SAFE FALLBACK ----------
     res.json({
       success: false,
       data: {
@@ -150,6 +154,40 @@ OUTPUT FORMAT (STRICT JSON):
         ],
       },
     });
+  }
+});
+
+// ---------------- STATS ROUTE (AI-ANALYSIS PAGE) ----------------
+app.get("/stats", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("complaints")
+      .select("type, incident_time");
+
+    if (error) throw error;
+
+    const total = data.length;
+    const typeCount = {};
+    const hourCount = Array(24).fill(0);
+
+    data.forEach((row) => {
+      if (row.type) {
+        typeCount[row.type] = (typeCount[row.type] || 0) + 1;
+      }
+      if (row.incident_time) {
+        const hour = new Date(row.incident_time).getHours();
+        hourCount[hour]++;
+      }
+    });
+
+    res.json({
+      total,
+      typeCount,
+      hourCount,
+    });
+  } catch (err) {
+    console.error("❌ Stats error:", err.message);
+    res.status(500).json({ error: "Stats unavailable" });
   }
 });
 
