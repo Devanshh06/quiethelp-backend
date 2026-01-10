@@ -5,9 +5,10 @@ dotenv.config(); // Load env variables FIRST
 
 import express from "express";
 import cors from "cors";
+import jwt from "jsonwebtoken";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
-import jwt from "jsonwebtoken";
+
 // ---------------- BASIC SETUP ----------------
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -35,6 +36,30 @@ const model = genAI.getGenerativeModel({
   model: "gemini-2.5-flash-lite",
 });
 
+// ---------------- AUTHORITY AUTH MIDDLEWARE ----------------
+function verifyAuthority(req, res, next) {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing authorization token" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.role !== "authority") {
+      return res.status(403).json({ error: "Forbidden access" });
+    }
+
+    req.authority = decoded; // store decoded token if needed later
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+}
+
 // ---------------- HEALTH CHECK ----------------
 app.get("/", (req, res) => {
   res.json({ status: "QuietHelp backend running" });
@@ -52,7 +77,6 @@ app.post("/analyze", async (req, res) => {
       });
     }
 
-    // ---------- Emergency keyword check ----------
     const emergencyWords = [
       "knife",
       "threaten",
@@ -62,7 +86,7 @@ app.post("/analyze", async (req, res) => {
       "attack",
     ];
 
-    const isEmergency = emergencyWords.some((word) =>
+    const isEmergency = emergencyWords.some(word =>
       text.toLowerCase().includes(word)
     );
 
@@ -84,7 +108,6 @@ app.post("/analyze", async (req, res) => {
       });
     }
 
-    // ---------- AI PROMPT ----------
     const prompt = `
 You are an AI assistant designed ONLY for analyzing women's safety incident reports.
 
@@ -95,20 +118,11 @@ STRICT RULES:
 - You must NOT mention police, laws, or authorities.
 - You must NOT include opinions or explanations.
 - You must ONLY return valid JSON.
-- If input is not a valid incident, write in summary:
-  "Please describe a valid safety-related situation."
-
-TASKS:
-1. Identify incident_type (Harassment, Stalking, Verbal Abuse, Safe, Other)
-2. Identify urgency (Low, Medium, High)
-3. Identify emotion (Fear, Anxiety, Anger, Neutral, Other)
-4. Write a neutral 1–2 sentence summary
-5. Provide supportive, non-judgmental guidance (max 3 points)
 
 INCIDENT:
 "${text}"
 
-OUTPUT FORMAT (STRICT JSON):
+OUTPUT FORMAT:
 {
   "incident_type": "",
   "urgency": "",
@@ -119,25 +133,11 @@ OUTPUT FORMAT (STRICT JSON):
 `;
 
     const result = await model.generateContent(prompt);
-    let aiText = result.response.text();
+    let aiText = result.response.text().replace(/```json|```/g, "").trim();
 
-    aiText = aiText.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(aiText);
 
-    let parsed;
-    try {
-      parsed = JSON.parse(aiText);
-    } catch (err) {
-      console.error("❌ JSON parse failed:", aiText);
-      return res.status(500).json({
-        success: false,
-        error: "AI returned invalid format",
-      });
-    }
-
-    res.json({
-      success: true,
-      data: parsed,
-    });
+    res.json({ success: true, data: parsed });
   } catch (err) {
     console.error("❌ Gemini error:", err.message);
     res.json({
@@ -157,7 +157,7 @@ OUTPUT FORMAT (STRICT JSON):
   }
 });
 
-// ---------------- STATS ROUTE (AI-ANALYSIS PAGE) ----------------
+// ---------------- PUBLIC STATS ROUTE ----------------
 app.get("/stats", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -170,82 +170,87 @@ app.get("/stats", async (req, res) => {
     const typeCount = {};
     const hourCount = Array(24).fill(0);
 
-    data.forEach((row) => {
-      if (row.type) {
-        typeCount[row.type] = (typeCount[row.type] || 0) + 1;
-      }
+    data.forEach(row => {
+      if (row.type) typeCount[row.type] = (typeCount[row.type] || 0) + 1;
       if (row.incident_time) {
-        const hour = new Date(row.incident_time).getHours();
-        hourCount[hour]++;
+        hourCount[new Date(row.incident_time).getHours()]++;
       }
     });
 
-    res.json({
-      total,
-      typeCount,
-      hourCount,
-    });
+    res.json({ total, typeCount, hourCount });
   } catch (err) {
     console.error("❌ Stats error:", err.message);
     res.status(500).json({ error: "Stats unavailable" });
   }
 });
+
 // ---------------- AUTHORITY LOGIN (DEMO) ----------------
 app.post("/authority/login", async (req, res) => {
   try {
-    // 1. Read data sent by frontend
     const { email, password } = req.body;
 
-    // 2. Validate input
     if (!email || !password) {
-      return res.status(400).json({
-        error: "Email and password are required"
-      });
+      return res.status(400).json({ error: "Email and password required" });
     }
 
-    // 3. Fetch authority user from Supabase
     const { data, error } = await supabase
       .from("authority_users")
       .select("*")
       .eq("email", email)
-      .single();
+      .limit(1);
 
-    // 4. If user not found
-    if (error || !data) {
-      return res.status(401).json({
-        error: "Invalid credentials"
-      });
+    if (error || !data || data.length === 0) {
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // 5. Check password (demo logic)
-    if (data.password !== password) {
-      return res.status(401).json({
-        error: "Invalid credentials"
-      });
+    const user = data[0];
+
+    if (user.password !== password) {
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // 6. Create signed JWT token
     const token = jwt.sign(
       {
-        authority_id: data.id,
+        authority_id: user.id,
         role: "authority",
-        organization: data.organization
+        organization: user.organization,
       },
       process.env.JWT_SECRET,
       { expiresIn: "2h" }
     );
 
-    // 7. Send token to frontend
-    res.json({
-      success: true,
-      token
+    res.json({ success: true, token });
+  } catch (err) {
+    console.error("❌ Authority login error:", err.message);
+    res.status(500).json({ error: "Authority login failed" });
+  }
+});
+
+// ---------------- AUTHORITY STATS (PROTECTED) ----------------
+app.get("/authority/stats", verifyAuthority, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("complaints")
+      .select("type, incident_time")
+      .eq("visibility", "authority");
+
+    if (error) throw error;
+
+    const total = data.length;
+    const typeCount = {};
+    const hourCount = Array(24).fill(0);
+
+    data.forEach(row => {
+      if (row.type) typeCount[row.type] = (typeCount[row.type] || 0) + 1;
+      if (row.incident_time) {
+        hourCount[new Date(row.incident_time).getHours()]++;
+      }
     });
 
+    res.json({ total, typeCount, hourCount });
   } catch (err) {
-    console.error("Authority login error:", err.message);
-    res.status(500).json({
-      error: "Authority login failed"
-    });
+    console.error("❌ Authority stats error:", err.message);
+    res.status(500).json({ error: "Failed to load authority stats" });
   }
 });
 
