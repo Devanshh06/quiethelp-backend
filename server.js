@@ -7,7 +7,7 @@ import express from "express";
 import cors from "cors";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
-
+import jwt from "jsonwebtoken";
 // ---------------- BASIC SETUP ----------------
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -188,6 +188,64 @@ app.get("/stats", async (req, res) => {
   } catch (err) {
     console.error("❌ Stats error:", err.message);
     res.status(500).json({ error: "Stats unavailable" });
+  }
+});
+// ---------------- AUTHORITY LOGIN (DEMO) ----------------
+app.post("/authority/login", async (req, res) => {
+  try {
+    // 1. Read data sent by frontend
+    const { email, password } = req.body;
+
+    // 2. Validate input
+    if (!email || !password) {
+      return res.status(400).json({
+        error: "Email and password are required"
+      });
+    }
+
+    // 3. Fetch authority user from Supabase
+    const { data, error } = await supabase
+      .from("authority_users")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    // 4. If user not found
+    if (error || !data) {
+      return res.status(401).json({
+        error: "Invalid credentials"
+      });
+    }
+
+    // 5. Check password (demo logic)
+    if (data.password !== password) {
+      return res.status(401).json({
+        error: "Invalid credentials"
+      });
+    }
+
+    // 6. Create signed JWT token
+    const token = jwt.sign(
+      {
+        authority_id: data.id,
+        role: "authority",
+        organization: data.organization
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: "2h" }
+    );
+
+    // 7. Send token to frontend
+    res.json({
+      success: true,
+      token
+    });
+
+  } catch (err) {
+    console.error("Authority login error:", err.message);
+    res.status(500).json({
+      error: "Authority login failed"
+    });
   }
 });
 
