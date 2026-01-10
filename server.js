@@ -53,7 +53,7 @@ function verifyAuthority(req, res, next) {
       return res.status(403).json({ error: "Forbidden access" });
     }
 
-    req.authority = decoded; // store decoded token if needed later
+    req.authority = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -116,7 +116,6 @@ STRICT RULES:
 - You must NOT answer unrelated questions.
 - You must NOT provide legal advice.
 - You must NOT mention police, laws, or authorities.
-- You must NOT include opinions or explanations.
 - You must ONLY return valid JSON.
 
 INCIDENT:
@@ -134,7 +133,6 @@ OUTPUT FORMAT:
 
     const result = await model.generateContent(prompt);
     let aiText = result.response.text().replace(/```json|```/g, "").trim();
-
     const parsed = JSON.parse(aiText);
 
     res.json({ success: true, data: parsed });
@@ -231,23 +229,55 @@ app.get("/authority/stats", verifyAuthority, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("complaints")
-      .select("type, incident_time")
-      .eq("visibility", "authority");
+      .select("type, created_at, visibility, ai_analysis")
+      .order("created_at", { ascending: false });
 
     if (error) throw error;
 
-    const total = data.length;
-    const typeCount = {};
-    const hourCount = Array(24).fill(0);
+    const authorityComplaints = [];
+    const awarenessComplaints = [];
+    const authorityTypeCount = {};
+    const awarenessTypeCount = {};
 
     data.forEach(row => {
-      if (row.type) typeCount[row.type] = (typeCount[row.type] || 0) + 1;
-      if (row.incident_time) {
-        hourCount[new Date(row.incident_time).getHours()]++;
+      let summary = "AI summary not available";
+
+      if (row.ai_analysis && typeof row.ai_analysis === "object") {
+        summary = row.ai_analysis.summary || summary;
+      }
+
+      const item = {
+        type: row.type || "Unknown",
+        time: row.created_at,
+        summary
+      };
+
+      if (row.visibility === "authority") {
+        authorityComplaints.push(item);
+        authorityTypeCount[item.type] =
+          (authorityTypeCount[item.type] || 0) + 1;
+      }
+
+      if (row.visibility === "awareness") {
+        awarenessComplaints.push(item);
+        awarenessTypeCount[item.type] =
+          (awarenessTypeCount[item.type] || 0) + 1;
       }
     });
 
-    res.json({ total, typeCount, hourCount });
+    res.json({
+      authority: {
+        count: authorityComplaints.length,
+        complaints: authorityComplaints.slice(0, 5),
+        typeCount: authorityTypeCount
+      },
+      awareness: {
+        count: awarenessComplaints.length,
+        complaints: awarenessComplaints.slice(0, 5),
+        typeCount: awarenessTypeCount
+      }
+    });
+
   } catch (err) {
     console.error("❌ Authority stats error:", err.message);
     res.status(500).json({ error: "Failed to load authority stats" });
