@@ -229,7 +229,7 @@ app.get("/authority/stats", verifyAuthority, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("complaints")
-      .select("type, created_at, visibility, ai_analysis")
+      .select("type, created_at, visibility, ai_analysis,location")
       .order("created_at", { ascending: false });
 
     if (error) throw error;
@@ -247,10 +247,12 @@ app.get("/authority/stats", verifyAuthority, async (req, res) => {
       }
 
       const item = {
-        type: row.type || "Unknown",
-        time: row.created_at,
-        summary
-      };
+  type: row.type || "Unknown",
+  time: row.created_at,
+  summary,
+  location: row.location || null
+};
+
 
       if (row.visibility === "authority") {
         authorityComplaints.push(item);
